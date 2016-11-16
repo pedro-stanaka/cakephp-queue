@@ -3,6 +3,8 @@
 namespace Queue\Model\Table;
 
 use Cake\Core\Configure;
+use Cake\Database\Query;
+use Cake\Datasource\ConnectionManager;
 use Cake\I18n\Time;
 use Cake\ORM\Table;
 use Exception;
@@ -187,13 +189,16 @@ class QueuedTasksTable extends Table {
 		$nowStr = $now->toDateTimeString();
 
 		$query = $this->find();
-		$findCond = [
+
+		$diffExpression = $this->getTimeDiffExpression($nowStr);
+
+		$findOptions = [
 			'conditions' => [
 				'completed IS' => null,
 				'OR' => [],
 			],
 			'fields' => [
-				'age' => $query->newExpr()->add('IFNULL(TIMESTAMPDIFF(SECOND, "' . $nowStr . '", notbefore), 0)')
+				'age' =>	$query->newExpr()->add($diffExpression)
 			],
 			'order' => [
 				'age ASC',
@@ -202,7 +207,7 @@ class QueuedTasksTable extends Table {
 		];
 
 		if ($group !== null) {
-			$findCond['conditions']['task_group'] = $group;
+			$findOptions['conditions']['task_group'] = $group;
 		}
 
 		// generate the task specific conditions.
@@ -230,10 +235,10 @@ class QueuedTasksTable extends Table {
 			if (array_key_exists('rate', $task) && $tmp['jobtype'] && array_key_exists($tmp['jobtype'], $this->rateHistory)) {
 				$tmp['UNIX_TIMESTAMP() >='] = $this->rateHistory[$tmp['jobtype']] + $task['rate'];
 			}
-			$findCond['conditions']['OR'][] = $tmp;
+			$findOptions['conditions']['OR'][] = $tmp;
 		}
 
-		$job = $query->find('all', $findCond)
+		$job = $query->find('all', $findOptions)
 			->autoFields(true)
 			->first();
 
@@ -363,7 +368,8 @@ class QueuedTasksTable extends Table {
 	 *
 	 * @return void
 	 */
-	public function cleanOldJobs() {
+	public function cleanOldJobs()
+	{
 		$this->deleteAll([
 			'completed <' => time() - Configure::read('Queue.cleanuptimeout'),
 		]);
@@ -514,6 +520,40 @@ class QueuedTasksTable extends Table {
 		foreach ($sql as $snippet) {
 			$this->_connection->execute($snippet);
 		}
+	}
+
+	/**
+	 * Return a SQL expression to diff dates depending on the database being used.
+	 *
+	 * @param $nowStr string A string representing the current date and time.
+	 * @return string The expression to diff dates.
+	 */
+	private function getTimeDiffExpression($nowStr) {
+		$driverClass = $this->getDriverClass();
+
+		$diffExpression = "";
+
+		switch ($driverClass) {
+			case "Postgres": {
+				$diffExpression = "COALESCE((EXTRACT(EPOCH FROM '" . $nowStr . "' - notbefore)), 0)";
+				break;
+			}
+			case "Mysql": {
+				$diffExpression = 'IFNULL(TIMESTAMPDIFF(SECOND, "' . $nowStr . '", notbefore), 0)';
+				return $diffExpression;
+			}
+		}
+		return $diffExpression;
+	}
+
+	/**
+	 * @return mixed
+	 */
+	private function getDriverClass() {
+		$driver = $this->connection()->config()['driver'];
+		$driver = explode('\\', $driver);
+		$driverClass = array_pop($driver);
+		return $driverClass;
 	}
 
 }
